@@ -1,0 +1,986 @@
+
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
+import sklearn as skl
+from __future__ import division 
+from IPython.display import Image
+from IPython.core.display import HTML 
+
+
+# In[2]:
+
+
+members = pd.read_csv('members_v2.csv')
+transaction = pd.read_csv('transactions_v2.csv')
+user_logs = pd.read_csv('user_logs_v2.csv')
+train = pd.read_csv('train_v2.csv')
+
+
+# ## 1.2 Data Sets
+# __1.Members__: user information. __795,090 rows, 6 cols__
+# * __msno__: user id
+# * __city__
+# * __bd__: age
+# * __gender__
+# * __registered_via__: registration method
+# * __registration_init_time__: format %Y%m%d
+# 
+# *Note that not every user in the dataset is available.
+# 
+# __2.Transaction__: transactions of users.  __1,431,009 rows, 9 cols__
+# * __msno__: user id
+# * __payment_method_id__: payment method
+# * __payment_plan_days__: length of membership plan in days
+# * __plan_list_price__: in New Taiwan Dollar (NTD)
+# * __actual_amount_paid__: in New Taiwan Dollar (NTD)
+# * __is_auto_renew__
+# * __transaction_date__: format %Y%m%d
+# * __membership_expire_date__: format %Y%m%d
+# * __is_cancel__: whether or not the user canceled the membership in this transaction.
+# 
+# *Data collected until 3/31/2017.
+# 
+# __3.User_logs__: daily user logs describing listening behaviors of a user. __18,396,362 rows, 9 cols__
+# * __msno__: user id
+# * __date__: format %Y%m%d
+# * __num_25__: # of songs played less than 25% of the song length
+# * __num_50__: # of songs played between 25% to 50% of the song length
+# * __num_75__: # of songs played between 50% to 75% of of the song length
+# * __num_985__: # of songs played between 75% to 98.5% of the song length
+# * __num_100__: # of songs played over 98.5% of the song length
+# * __num_unq__: # of unique songs played
+# * __total_secs__: total seconds played
+# 
+# *Data collected from 3/01/2017 to 3/31/2017.
+# 
+# __4.train__: the train set. __970,960 rows, 2 cols__
+# * __msno__: user id
+# * __is_churn__: This is the target variable. Churn is defined as whether the user did not continue the subscription within 30 days of expiration. is_churn = 1 means churn,is_churn = 0 means renewal.
+# 
+# 
+# *Note that the relationships between __train__ and __transaction__, and between __train__ and __user_logs__ are __One to multiple Relationships__.
+# 
+# *Note that not every user in the training set is available in other data sets.
+
+# In[3]:
+
+
+members.head()
+
+
+# In[4]:
+
+
+transaction.head()
+
+
+# In[5]:
+
+
+user_logs.head()
+
+
+# In[6]:
+
+
+train.head()
+
+
+# ## 1.3 Data Preparation
+# 
+# ![Image of Yaktocat](https://accellis.com/wp-content/uploads/Cleaning-Up-Time-Matters-Database.jpg)
+
+# ### 1.3.1 Members
+
+# In[7]:
+
+
+members.dtypes
+
+
+# * 3 categorical variables: city(encoded), registered_via(encoded) and gender
+# * 1 demographic numerical variable: bd(age) 
+# * 1 date variable: registration_init_time
+# 
+# firstly, lets get rid of variables if the missing value is dorminant
+
+# In[8]:
+
+
+missing = {}
+for i in members.columns:
+    missing[i] = float(members[i].isnull().sum())/members[i].shape[0]
+missing 
+
+
+# In[9]:
+
+
+members_new = members.drop('gender', axis = 1)
+members_new.describe()
+
+
+# Note that the variable bd has a unnormal range, which is apparently against the real age distribution.
+
+# In[10]:
+
+
+plt.figure(1, (6, 6))
+plt.boxplot(members_new.bd)
+plt.show()
+
+
+# Let's zoom in within a smaller range.
+
+# In[11]:
+
+
+plt.figure(1,(6,6))
+n, bins, patches =plt.hist(members_new.bd, 1000, normed=0, facecolor='blue', alpha=0.5)
+plt.xlabel('age')
+plt.ylabel('count')
+plt.title('Distribution of Customer Age')
+plt.axis([-100,100,0,500000])
+plt.show()
+
+
+# In[12]:
+
+
+members_new.loc[members_new['bd'] <= 0 ,'bd'].count()/members_new.bd.count()
+
+
+# Considering the fact that people may not enter their real age and the unvalid entries are dominant(60%), we can't take bd as a qualified variable in our case.
+
+# In[13]:
+
+
+members_new.drop('bd', axis = 1, inplace = True)
+
+
+# In[14]:
+
+
+members_new.head()
+
+
+# ### 1.3.2 Transaction
+
+# In[15]:
+
+
+transaction.dtypes
+
+
+# * 1 categorical variable: payment_method_id(encoded)
+# * 2 boolean variables: is_auto_renew(encoded), is_cancel(encoded)
+# * 3 numerical variable: plan_list_price, actual_amount_paid, and payment_plan_days
+# * 2 date variables: transaction_date, membership_expire_date
+# 
+# Still, let's check the variables' validation first.
+
+# In[16]:
+
+
+missing = {} 
+for i in transaction.columns:
+    missing[i] = transaction[i].isnull().sum()/transaction[i].shape[0]
+missing
+
+
+# In[17]:
+
+
+transaction.describe()
+
+
+# Note that the __plan_list_price__ and the __actual_amount_paid__ almost have same performance here, let's run a t-test on them. 
+
+# In[18]:
+
+
+from scipy import stats
+stats.ttest_ind(transaction.plan_list_price,transaction.actual_amount_paid,nan_policy='propagate')
+
+
+# The p-value is larger than 0.05, then we cannot reject the null hypothesis of identical average scores. So we decided to only keep the __actual_amount_paid__.
+# 
+# As the Multicollinearity cannot be easily recognized by the descriptions, it will be discussed in the __2 Initial Analysis__ section after merging all the tables.
+
+# Rightnow, An important issue is that Transaction data set has repeated user obs. we had to create new variables and change the relationship between key __'msno'__ and __other variables__ from one-to-multiple to one-to-one. The transformations were based on the following rules: 
+# * total_payment_method = (payment_method_id).unique().count()
+# * total_memberday = sum(payment_plan_days)
+# * total_amount_paid = sum(actual_amout_paid)
+# * avg_autorenew = avg(is_auto_renew)
+# * transaction_times = count(transaction_date)
+# * member_exp_date = max(membership_expire_date)
+# * avg_user_cancel = avg(is_cancel)
+# 
+
+# In[19]:
+
+
+total_payment_method = transaction.groupby('msno').payment_method_id.nunique().reset_index().rename(columns = {'payment_method_id': 'total_payment_method'})
+user_total_memberday = transaction.groupby('msno')['payment_plan_days'].sum().reset_index().rename(columns = {'payment_plan_days': 'total_memberday'})
+total_amount_paid = transaction.groupby('msno')['actual_amount_paid'].sum().reset_index().rename(columns = {'actual_amount_paid': 'total_amount_paid'})
+average_auto_renew = transaction.groupby('msno')['is_auto_renew'].mean().reset_index().rename(columns = {'is_auto_renew': 'avg_autorenew'})
+count_transaction_times = transaction.groupby('msno')['transaction_date'].count().reset_index().rename(columns = {'transaction_date':'transaction_times' })
+user_max_expiredate = transaction.groupby('msno')['membership_expire_date'].max().reset_index().rename(columns = {'membership_expire_date': 'member_exp_date'})
+user_cancel_average = transaction.groupby('msno')['is_cancel'].mean().reset_index().rename(columns = {'is_cancel': 'avg_user_cancel'})
+
+
+# In[20]:
+
+
+frame1 = [total_payment_method,user_total_memberday,total_amount_paid,average_auto_renew,count_transaction_times,user_max_expiredate,user_cancel_average]
+transaction_new = reduce(lambda left,right: pd.merge(left,right,on = 'msno'), frame1)
+
+
+# Check the new variables:
+
+# In[21]:
+
+
+transaction_new.head()
+
+
+# ### 1.3.3 User_logs
+
+# In[22]:
+
+
+user_logs.dtypes
+
+
+# In[23]:
+
+
+missing = {} 
+for i in user_logs.columns:
+    missing[i] = user_logs[i].isnull().sum()/user_logs[i].shape[0]
+missing
+
+
+# Same situation with Transaction, the user_logs data set has repeated user obs as well. Again, to transform into a One-to-One relationship, we created new variables based on the following rules:
+# 
+# * log_times = count(date)
+# * log_new = max(date)
+# * num_x = avg(num_x)
+# * total_secs = avg(total_secs)
+
+# In[24]:
+
+
+log_times =user_logs.groupby('msno')['date'].count().reset_index().rename(columns ={'date':'log_times'})
+log_new =user_logs.groupby('msno')['date'].max().reset_index().rename(columns ={'date':'log_new'})
+user_25_avg =user_logs.groupby('msno')['num_25'].mean().reset_index().rename(columns ={'num_25':'daily_25'})
+user_50_avg =user_logs.groupby('msno')['num_50'].mean().reset_index().rename(columns ={'num_50':'daily_50'})
+user_75_avg =user_logs.groupby('msno')['num_75'].mean().reset_index().rename(columns ={'num_75':'daily_75'})
+user_985_avg =user_logs.groupby('msno')['num_985'].mean().reset_index().rename(columns ={'num_985':'daily_985'})
+user_100_avg =user_logs.groupby('msno')['num_100'].mean().reset_index().rename(columns ={'num_100':'daily_100'})
+user_unq_avg =user_logs.groupby('msno')['num_unq'].mean().reset_index().rename(columns ={'num_unq':'daily_unq'})
+user_ts_avg =user_logs.groupby('msno')['total_secs'].mean().reset_index().rename(columns ={'total_secs':'daily_total'})
+
+
+# In[25]:
+
+
+frame2 =[log_times,log_new,user_25_avg,user_50_avg,user_75_avg,user_985_avg,user_100_avg,user_unq_avg,user_ts_avg]
+user_logs_new = reduce(lambda left,right: pd.merge(left,right,on='msno'), frame2)
+
+
+# In[26]:
+
+
+user_logs_new.head()
+
+
+# ## 1.4 Data Combination
+
+# As mentioned in the begining, not every user in the __Train__ has complete records in other datasets. Exp, they might never log in so there is no such id in user_logs. 
+# 
+# Anyways, we still right joined all the table with __train__ to keep all users in Train even with incomplete obs, in case that if some users in the __Test__ also have incomplete records, we may still have a pattern to predict.  
+
+# In[27]:
+
+
+df = pd.merge(members_new, train, on = 'msno', how = 'right')
+df = pd.merge(transaction_new, df, on = 'msno', how = 'right')
+df = pd.merge(user_logs_new, df, on = 'msno', how = 'right')
+df.shape
+
+
+# So, the initial merged dataset has the same number of rows with __Train__, and 19 variables besides the key __'msno'__ and target variable __'is_churn"__.
+
+# # 2 Initial Analysis
+
+# ## 2.1 Summary of the Dataset
+# ![Image of Yaktocat](http://i.ytimg.com/vi/-pziElSiJgc/maxresdefault.jpg)
+
+# ### 2.1.1 Missing Values
+
+# In[29]:
+
+
+missing = {} 
+for i in df.columns:
+    missing[i] = df[i].isnull().sum()/df[i].shape[0]
+    
+pd.DataFrame(missing.items(), columns=["X", "Missing%"])
+
+
+# After merger, the missing value of __members__ is 27.96%, of __transaction__ is 3.85%, and of __user_logs__ is 22.29%. All the missing value will be ignored in this section, but will be imputed later in Processing Data section. 
+
+# ### 2.1.2 Variable Distribution
+
+# In[30]:
+
+
+df.describe()
+
+
+# From the description, there are some points to note:
+# * the majority of is_churn is 0(>75%), not churned.
+# * log_times vary from 1 day to 31 days(log in every day).
+# * most member_exp_dates are in the near future (April), but some member_exp_dates are in a very far future
+# * the max of number of songs played daily are very high, is that possible? lets go back to the original data to check. 
+# 
+# Here we take __daily_100__, the avg number of songs played over 98.5% of the song length daily as an example.
+
+# In[31]:
+
+
+df.loc[df['daily_100'] == df.daily_100.max(),'msno']
+
+
+# In[32]:
+
+
+user_logs.loc[user_logs['msno']=='yK9jxHXWeuQDggeMLiwrJRoLygKWURnrv3fq1wcthT0=',]
+
+
+# # __OK__, the world is full of interesting things...
+
+# As the original data showed that this user did log in every day in March, and played an incrediblly large amount of songs! But, the validation of its __num_100__ and __total_secs__ should be doubted due to the total_secs was way longer than a day(max 86400 secs), and you __can't play__ such large number of songs on their full lenth even if they were all less than a minute(which is obviously not the real case). 
+# 
+# We have to check those numbers' distributions.
+
+# In[33]:
+
+
+plt.figure(1, (16, 5))
+plt.subplot(121)
+sns.boxplot(x="daily_100", data=df)
+plt.figure(1, (16, 5))
+plt.subplot(122)
+sns.boxplot(x="daily_total", data=df)
+
+plt.show()
+
+
+# Compared to daily number of songs 100% and daily total seconds played, number of songs under 25%,50%,75% and 98.5% have more normal distribution.
+
+# In[34]:
+
+
+plt.figure(1, (16, 5))
+plt.subplot(221)
+sns.boxplot(x="daily_985", data=df)
+plt.figure(1, (16, 5))
+plt.subplot(222)
+sns.boxplot(x="daily_75", data=df)
+plt.figure(2, (16, 5))
+plt.subplot(223)
+sns.boxplot(x="daily_50", data=df)
+plt.figure(2, (16, 5))
+plt.subplot(224)
+sns.boxplot(x="daily_25", data=df)
+
+plt.show()
+
+
+# We will hold on those variables to see their performance later. Lets take a look at other variables' distribution.
+
+# In[35]:
+
+
+sns.set_style('ticks')
+fig, ax = plt.subplots()
+fig.set_size_inches(7, 5)
+ax.set(ylim=(0, 1))
+sns.regplot(x="transaction_times", y="is_churn", data=df, ax=ax)
+plt.show()
+
+
+# An interesting distribution is that the __not_churned customers__ have a smaller range of transaction times, which is kinda opposite of the common sense, if you purchased it for a long time, why do you decided to churn at the end? Is it a product life cycle for individual customer???
+# 
+# But in other words, the not_churned customers are relatively new, which makes sense at a certain degree.
+
+# In[36]:
+
+
+sns.regplot(x = "log_times",y = 'transaction_times', data=df)
+plt.show()
+
+
+# The pattern is not certain, but the more monthly log-in times, the bigger chance to have a higher number of total transaction times.
+
+# ## 2.2 Correlation Analysis
+
+# In[37]:
+
+
+get_ipython().magic(u'matplotlib inline')
+sns.set(style="white")
+corr = df.corr()
+
+# Generate a mask for the upper triangle
+mask = np.zeros_like(corr, dtype=np.bool)
+mask[np.triu_indices_from(mask)] = True
+
+# Set up the matplotlib figure
+f, ax = plt.subplots(figsize=(15, 15))
+
+# Generate a custom diverging colormap
+cmap = sns.diverging_palette(220, 10, as_cmap=True)
+
+# Draw the heatmap with the mask and correct aspect ratio
+sns.heatmap(corr, mask=mask, cmap=cmap, vmax=1, center=0,vmin=-1,square=True, linewidths=.3, cbar_kws={"shrink": .5})
+
+
+# Note that __daily_100__ and __daily_total__ both have a high correlation with each other and __daily_unq__, also and a low correlation with target. Considering they have a lot abnormal outliers too, we decided to drop those two variables. 
+# 
+# Another situation is among __total_memberday__, __total_amount_paid__ and __member_exp_date__. They all have high correlation to each other.
+
+# In[38]:
+
+
+sns.boxplot(x='is_churn',y= 'member_exp_date',hue='is_churn', data = df) 
+plt.show()
+
+
+# As above, membership expiration date has no strong consistant pattern. We decided to only keep the __total_memberday__ which has the highest corr coef with the target __is_churn__ among those three variables. 
+
+# In[39]:
+
+
+df_new = df.drop(['daily_100','daily_total','total_amount_paid','member_exp_date'], axis = 1)
+
+
+# # 3 Process Data
+
+# ## 3.1 Imputing Missing
+# ![Image of Yaktocat](https://2.bp.blogspot.com/-AtuHKLBBWYI/WB4C--Rfz4I/AAAAAAAAAHM/N75EdqY-1xs40yCnq-O06-Hhu7Vel_0NQCLcB/s1600/missing_data.jpg)
+
+# We have totally 19 variables excluding dependent variable “_is_churn_” and a primary identified user id “_msno_”. 
+# 
+# For those variables from __user_logs__ dataset:
+# 
+# * “daily_25”, “daily_50”, “daily_75”, “daily_985”, “daily_100”, “daily_total”, “daily_unq” and “log_times”, we will fill in the missing with 0. Because the missing value in ‘user_logs’ means this user did not login in KKbox within the certain period of time.  
+# * for the date variable “log_new”, the missing value should be replaced by a date that earlier than 3/01/2017, which means the user did not log in in March.
+# 
+# 
+# For variables from __transaction__ dataset:
+# * all the missing value of “total_amount_paid”, “total_payment_method”, “transaction_times”, “avg_autorenew” and “avg_user_cancel” will be replaced with 0. Because the missing value means that there are no transaction happened for those users. 
+# 
+# For variables from __members__ dataset:
+# * “city” and “registered_via” are categorical variables, we will create a new level “0” to replace the missing value
+# 
+# * “registration_int_time” will be replaced with the median date to prevent the outlier of variables.
+# 
+# 
+
+# In[40]:
+
+
+df_new.registration_init_time = df_new.registration_init_time.fillna(value = df.registration_init_time.median())
+df_new.log_new = df_new.log_new.fillna(value = 20170228)
+df_new = df_new.fillna(value = 0)
+
+
+# In[41]:
+
+
+df_new.isnull().sum().tolist()
+
+
+# ## 3.2 Multicollinearity Exploration
+
+# ### 3.2.1 VIF
+
+# In[42]:
+
+
+df_vif = df_new.drop(['msno','is_churn'], axis =1)
+
+
+# In[43]:
+
+
+from statsmodels.stats.outliers_influence import variance_inflation_factor
+
+def calculate_vif_(X) :
+    vif_values = {}
+    vif = [variance_inflation_factor(X.values, ix) for ix in range(X.shape[1])]
+    for i in range(len(X.columns)):
+        vif_values[X.columns[i]] = vif[i]
+    return vif_values
+
+
+# In[44]:
+
+
+pd.DataFrame(calculate_vif_(df_vif).items(), columns=["X", "VIF"])
+
+
+# Note that all of the VIF scores are much smaller than 10, suggesting that the high degree of multicollinearity is not present. 
+# 
+# Plus we already selected several variables in the correlation part, the VIF scores proved that our dataset is ready to go to next stage.
+
+# ## 3.3 Data Transformation 
+
+# Before transform the data, we have to __normalize Date variables__ because of time's different Magnitude:
+# * registration_init_time (a date varys from 20040330 to 20170420)
+# * log_new (a date varys from 20170301 to 20170331)
+
+# In[45]:
+
+
+df_new['log_new'] = df_new['log_new'].subtract(df_new['log_new'].mean())/df_new['log_new'].std()
+df_new['registration_init_time'] = df_new['registration_init_time'].subtract(df_new['registration_init_time'].mean())/df_new['registration_init_time'].std()
+
+
+# Change the data type of encoded categorical variables to int64:
+
+# In[46]:
+
+
+df_new['city'] = df_new['city'].astype('int64')
+df_new['registered_via'] = df_new['registered_via'].astype('int64')
+df_new.dtypes
+
+
+# Start a new branch here:
+
+# In[64]:
+
+
+df_tran = df_new.reset_index(drop = True)
+
+
+# Transform numerical data into new forms according to their highest correlation coefficient with target:
+
+# In[65]:
+
+
+def transform(df, label_name):
+       
+       for i in df.select_dtypes(include = ['float64']).columns:
+           asis = pd.to_numeric(df[i])
+           data_dict = {'asis' : asis, 
+                        'exp'  : np.e ** (asis+0.001), 
+                        'pow2' : np.power(asis, 2), 
+                        'pow4' : np.power(asis, 4)}
+           
+           if df[i].min() >= 0:
+               data_dict['log'] = np.log(asis+0.001)
+           
+           if df[i].min() >= 0:
+               data_dict['sqrt'] = np.sqrt(asis+0.001)
+
+           corr = {}
+           label_data = pd.to_numeric(df[label_name])
+           for option in data_dict:
+               corr[option] = abs(np.corrcoef(data_dict[option], label_data)[1][0])
+     
+           best_option = max(corr, key=corr.get)
+           df.loc[:, i] = data_dict[best_option]
+           df.rename(columns={i: "{}_{}".format(i, best_option)}, inplace=True)
+                                                                             
+       return df
+
+
+# In[66]:
+
+
+df_tran = transform(df_tran,'is_churn')
+
+
+# Now we can inputs our datasets into different models:
+# * __df_new__ (no missing, normalized date variables)
+# * __df_tran__ (no missing, normalized date variables, transformed numerical variables)
+
+# In[67]:
+
+
+df_new.head()
+
+
+# In[68]:
+
+
+df_tran.head()
+
+
+# # 4 Fitting Models & Post Model Analysis
+
+# ## 4.1 Logistic Regression
+# ![Image of Yaktocat](http://ataspinar.com/wp-content/uploads/2016/03/cropped-datawave-1024x768.jpg)
+
+# ### 4.1.1 Split Data Sets
+
+# In[52]:
+
+
+from sklearn.model_selection import train_test_split
+train_LR, test_LR = train_test_split(df_new, test_size = 0.3)
+train_tran_LR, test_tran_LR = train_test_split(df_tran, test_size = 0.3)
+
+
+# ### 4.1.2 Initial Fit for 2 Data Sets
+
+# In[53]:
+
+
+from sklearn.linear_model import LogisticRegression
+
+
+# __a)__ for df_new dataset:
+
+# In[54]:
+
+
+y1 = train_LR['is_churn']
+y1 = y1.astype('int')
+x1 = train_LR.drop(['is_churn','msno'], axis = 1)
+model = LogisticRegression()
+model_1 = model.fit(x1, y1)
+model_1
+
+
+# __b)__ for df_tran dataset:
+
+# In[55]:
+
+
+y2 = train_tran_LR['is_churn']
+y2 = y2.astype('int')
+x2 = train_tran_LR.drop(['is_churn','msno'], axis = 1)
+model = LogisticRegression()
+model_2 = model.fit(x2, y2)
+model_2
+
+
+# ### 4.1.3 Evaluating Models Performance
+
+# __a)__ for df_new dataset:
+
+# In[56]:
+
+
+y1_test = test_LR['is_churn']
+y1_test = y1_test.astype('int')
+x1_test = test_LR.drop(['is_churn','msno'], axis = 1)
+predicted_1 = model_1.predict(x1_test)
+probs_1 = model_1.predict_proba(x1_test)
+
+
+# In[242]:
+
+
+from sklearn import metrics
+print 'Accuracy: ', metrics.accuracy_score(y1_test, predicted_1)
+
+
+# In[244]:
+
+
+from sklearn.metrics import roc_curve, auc
+
+fpr, tpr, thresholds = roc_curve(y1_test, probs_1[:,1])
+roc_auc = auc(fpr, tpr, reorder = True)
+
+f, ax = plt.subplots(figsize=(10, 8))
+plt.plot(fpr, tpr, label='ROC curve (area = %0.3f)' % roc_auc)
+plt.plot([0, 1], [0, 1], 'k--')  # random predictions curve
+plt.xlim([0.0, 1.0])
+plt.ylim([0.0, 1.0])
+plt.xlabel('False Positive Rate or (1 - Specifity)')
+plt.ylabel('True Positive Rate or (Sensitivity)')
+plt.title('Receiver Operating Characteristic')
+plt.legend(loc="lower right")
+plt.show()
+
+
+# __b)__ For df_tran dataset:
+
+# In[58]:
+
+
+y2_test = test_tran_LR['is_churn']
+y2_test = y1_test.astype('int')
+x2_test = test_tran_LR.drop(['is_churn','msno'], axis = 1)
+predicted_2 = model_2.predict(x2_test)
+probs_2 = model_2.predict_proba(x2_test)
+print 'Accuracy: ', metrics.accuracy_score(y2_test, predicted_2)
+print 'ROC: ' ,metrics.roc_auc_score(y2_test, probs_2[:, 1])
+
+
+# In conculsion, the performance of the df_new data set is better due to its higher ROC score, which is very important for churn prediction case, so the model_1 is better.
+
+# ## 4.2 Naive Bayes
+# ![Image of Yaktocat](https://materiaalit.github.io/intro-to-ai-17/img/diagrams/nbmodel-e74b4b40.png)
+# 
+# One problem in our case is that there are hundereds of thousands of data points and quite a few variables in the train dataset. It's almost impossible to run svm model which may take a few days to get a result.
+# Native Bayes is extremely fast relative ti other classfication algorithms. It is a classification technique based on Bayes' Theorem with an assumption of independence among predictors. All the predictions would independently contribute to the probality that this user will churn.
+# 
+# 
+# ### 4.2.1 Split Data Sets
+
+# __a)__ for df_new dataset:
+
+# In[255]:
+
+
+X = df_new.drop(['msno', 'is_churn'], axis = 1)
+Y = df_new.is_churn
+
+X = np.array(X)
+Y = np.array(Y)
+
+
+# __b)__ for df_tran dataset:
+
+# In[256]:
+
+
+X_T = df_tran.drop(['msno', 'is_churn'], axis = 1)
+Y_T = df_tran.is_churn
+
+X_T = np.array(X_T)
+Y_T = np.array(Y_T)
+
+
+# ### 4.2.2 Initial Fit for 2 Data Sets
+
+# In[257]:
+
+
+from sklearn.naive_bayes import GaussianNB
+
+model = GaussianNB() 
+model.fit(X, Y)
+predicted= model.predict(X)
+
+model1 = GaussianNB()
+model1.fit(X_T, Y_T)
+predicted_T = model1.predict(X_T)
+
+
+# ### 4.2.3 Evaluating Models Performance
+
+# __a)__ for df_new dataset:
+
+# In[259]:
+
+
+from sklearn.metrics import confusion_matrix
+
+tn, fp, fn, tp = confusion_matrix(Y, predicted).ravel()
+true_positive_rate = tp/float(tp+fp)
+accuracy_rate = (tp + tn)/float(tp+fp+tn+ fn)
+
+print 'TPR: ', true_positive_rate
+print 'Accuracy: ', accuracy_rate
+
+
+# __b)__ for df_tran dataset:
+
+# In[261]:
+
+
+tn1, fp1, fn1, tp1 = confusion_matrix(Y_T, predicted_T).ravel()
+true_positive_rate1 = tp1/float(tp1+fp1)
+accuracy_rate1 = (tp1 + tn1)/float(tp1+fp1+tn1+ fn1)
+
+print 'TPR: ', true_positive_rate1
+print 'Accuracy: ', accuracy_rate1
+
+
+# We can tell there is no significant different between two datasets'accuracy in Naive Bayes, but df_tran has a higher TPR. Therefore using df_tran to show the ROC curve.
+
+# In[262]:
+
+
+from sklearn.metrics import roc_curve, auc
+
+fpr, tpr, thresholds = roc_curve(Y_T, predicted_T)
+roc_auc = auc(fpr, tpr, reorder = True)
+
+f, ax = plt.subplots(figsize=(10, 8))
+plt.plot(fpr, tpr, label='ROC curve (area = %0.3f)' % roc_auc)
+plt.plot([0, 1], [0, 1], 'k--')  # random predictions curve
+plt.xlim([0.0, 1.0])
+plt.ylim([0.0, 1.0])
+plt.xlabel('False Positive Rate or (1 - Specifity)')
+plt.ylabel('True Positive Rate or (Sensitivity)')
+plt.title('Receiver Operating Characteristic')
+plt.legend(loc="lower right")
+plt.show()
+
+
+# ## 4.3 Decision Tree
+# 
+# ![Image of Yaktocat](https://media.licdn.com/mpr/mpr/AAEAAQAAAAAAAAy6AAAAJDM5ZGViZmQ1LWYxM2UtNGI5MS04M2VlLTcxZDQ2OWU4YzBmMA.jpg)
+
+# Decision tree builds classification models in the form of a tree structure. It breaks down the dataset into smaller and smaller subsets while at the same time an associated decision tree is incrementally developed.  The tree model include many leaf nodes and decision nodes with rules on every leaf. Just simply follow the rules of every leaf from beginning of the decision tree which generated by training data, we will able to predict the user behavior. 
+# 
+# The best part of choosing decision trees is that it can handle both categorical and numerical data. And not like _Binary logistic regression_ requires the dependent variable to be binary or _ordinal logistic regression_ requires the dependent variable to be ordinal, _decision tree_ does not have a pre-assumption when you are building the model. Multi-stage classifiers might be more accurate than single stage classifiers. But, there is always a trade-off between the complexity or size of trees and the test accuracy.
+# 
+# Here, we are going to use decision tree to train a model that will help us classify whether a KKbox user will churn or not. 
+
+# ### 4.3.1 Split Datasets
+
+# In[246]:
+
+
+from sklearn.model_selection import train_test_split
+from sklearn.model_selection import cross_val_score
+
+df_DT = df_tran.drop('msno',axis=1)
+train_DT, test_DT = train_test_split(df_DT, test_size = 0.3)
+
+
+# ### 4.3.2 Initial Fit
+
+# In[247]:
+
+
+from sklearn import tree
+classifier = tree.DecisionTreeClassifier()
+classifier.fit(train_DT.loc[:, ~(train_DT.columns == 'is_churn')], train_DT['is_churn'])
+
+
+# ### 4.3.3 Evaluating Models Performance
+
+# In[248]:
+
+
+pred_train = classifier.predict(train_DT.loc[:, ~(train_DT.columns == 'is_churn')])
+pred_test = classifier.predict(test_DT.loc[:, ~(test_DT.columns == 'is_churn')])
+
+
+# In[249]:
+
+
+from sklearn.metrics import accuracy_score
+ac_train = accuracy_score(pred_train, train_DT['is_churn'])
+ac_test = accuracy_score(pred_test, test_DT['is_churn'])
+print('the accuracy of the df_tran training data set is {tr} \nthe accuracy of the df_tran testing data set is {te}').format(tr=ac_train,te=ac_test)
+
+
+# In[250]:
+
+
+from sklearn.metrics import roc_curve, auc
+y_score = classifier.predict_proba(test_DT.loc[:, ~(test_DT.columns == 'is_churn')])
+y_true = np.asarray(test_DT['is_churn'])
+y_score = y_score[:, 1]
+
+fpr, tpr, thresholds = roc_curve(y_true, y_score)
+roc_auc = auc(fpr, tpr, reorder = True)
+
+f, ax = plt.subplots(figsize=(10, 8))
+plt.plot(fpr, tpr, label='ROC curve (area = %0.3f)' % roc_auc)
+plt.plot([0, 1], [0, 1], 'k--')  # random predictions curve
+plt.xlim([0.0, 1.0])
+plt.ylim([0.0, 1.0])
+plt.xlabel('False Positive Rate or (1 - Specifity)')
+plt.ylabel('True Positive Rate or (Sensitivity)')
+plt.title('Receiver Operating Characteristic')
+plt.legend(loc="lower right")
+plt.show()
+
+
+# ### 4.3.4 Model Improvment
+# 
+# Using 5-fold cross validation and get the optimal depth. 
+
+# In[237]:
+
+
+from sklearn import grid_search
+
+df_DT = df_tran.drop('msno',axis=1)
+train_DT, test_DT = train_test_split(df_DT, test_size = 0.3)
+
+parameters = {'max_depth':range(3,14)}
+
+classifier2 = grid_search.GridSearchCV(tree.DecisionTreeClassifier(), parameters, n_jobs=4, cv = 5)
+
+classifier2.fit(train_DT.loc[:, ~(train_DT.columns == 'is_churn')], train_DT['is_churn'])
+
+tree_model = classifier2.best_estimator_
+print (classifier2.best_score_, classifier2.best_params_)
+
+
+# In[251]:
+
+
+pred2_train = classifier2.predict(train_DT.loc[:, ~(train_DT.columns == 'is_churn')])
+pred2_test = classifier2.predict(test_DT.loc[:, ~(test_DT.columns == 'is_churn')])
+
+
+# In[252]:
+
+
+ac2_train = accuracy_score(pred2_train, train_DT['is_churn'])
+ac2_test = accuracy_score(pred2_test, test_DT['is_churn'])
+print('the accuracy of the training data set is {tr} \nthe accuracy of the testing data set is {te}').format(tr=ac2_train,te=ac2_test)
+
+
+# In[253]:
+
+
+from sklearn.metrics import roc_curve, auc
+y_score = classifier2.predict_proba(test_DT.loc[:, ~(test_DT.columns == 'is_churn')])
+y_true = np.asarray(test_DT['is_churn'])
+y_score = y_score[:, 1]
+
+f, ax = plt.subplots(figsize=(10, 8))
+fpr, tpr, thresholds = roc_curve(y_true, y_score)
+roc_auc = auc(fpr, tpr, reorder = True)
+plt.plot(fpr, tpr, label='ROC curve (area = %0.3f)' % roc_auc)
+plt.plot([0, 1], [0, 1], 'k--')  # random predictions curve
+plt.xlim([0.0, 1.0])
+plt.ylim([0.0, 1.0])
+plt.xlabel('False Positive Rate or (1 - Specifity)')
+plt.ylabel('True Positive Rate or (Sensitivity)')
+plt.title('Receiver Operating Characteristic')
+plt.legend(loc="lower right")
+plt.show()
+
+
+# Although here only showing the result of df_tran dataset, we actually tried both of df_new and df_tran datasets in initial fit and model improvement part.  The reason why we used df_tran was:
+# * the accurary rates of testing are close at begining
+#    * df_tran 0.9516
+#    * df_new 0.9522
+# * but __df_tran__ has a higher score after improvement
+#    * df_tran 0.9712
+#    * df_new 0.7513
+# 
+# 
+# In conculsion, the accuracy for the testing data set is slightly improved and the ROC score increased. And again, the True Positive Rate is critical for our churn prediction case, so this model is better.
+# 
+# 
+# 
+# 
+# 
+# 
+
+# .end.
+# 
+# ...
+# 
